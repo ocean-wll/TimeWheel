@@ -1,4 +1,4 @@
-package pers.ocean.timewheel.timer;
+package pers.ocean.timewheel.error.timer;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -39,10 +39,10 @@ public class TimerTask implements Runnable {
      * @param entry 实例对象
      */
     public synchronized void setTimerTaskEntry(TimerTaskEntry entry) {
-        if (timerTaskEntry != null && timerTaskEntry != entry) {
-            timerTaskEntry.remove();
+        if (this.timerTaskEntry != null && this.timerTaskEntry != entry) {
+            this.timerTaskEntry.remove();
         }
-        timerTaskEntry = entry;
+        this.timerTaskEntry = entry;
     }
 
     /**

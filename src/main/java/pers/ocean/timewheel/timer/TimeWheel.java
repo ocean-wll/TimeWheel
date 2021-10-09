@@ -1,122 +1,199 @@
 package pers.ocean.timewheel.timer;
 
-import java.util.concurrent.DelayQueue;
+import java.text.ParseException;
+import java.util.Calendar;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.PriorityQueue;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * @Description 时间轮主数据结构
+ * @Description 时间轮
  * @Author ocean_wll
- * @Date 2021/10/9 11:12 上午
+ * @Date 2021/10/9 3:56 下午
  */
 @Slf4j
 public class TimeWheel {
 
     /**
-     * 一个槽的时间间隔(时间轮最小刻度)
+     * 当前刻度
      */
-    private final Long tickMs;
+    private final AtomicInteger rollingIndex;
 
     /**
-     * 时间轮大小(槽的个数)
+     * 时间轮刻度
      */
-    private final Integer wheelSize;
+    private final int wheelScale;
 
     /**
-     * 一轮的时间跨度
+     * 时间轮转动间隔
      */
-    private final Long interval;
+    private final long interval;
 
     /**
-     * 当前时间
+     * 起始时间
      */
-    private Long currentTime;
+    private final long startTime;
 
     /**
-     * 槽
+     * 外面一层轮子
      */
-    private final TimerTaskList[] buckets;
+    private final TimeWheel outLayerWheel;
 
     /**
-     * 上层时间轮
+     * 单独线程池执行定时轮转
      */
-    private volatile TimeWheel overflowWheel;
+    private final Timer timer = new Timer();
 
-    /**
-     * 延迟队列，一个timer只有一个delayQueue
-     */
-    private final DelayQueue<TimerTaskList> delayQueue;
+    private final PriorityQueue<ITimerWheelTask>[] taskQueues;
 
-    public TimeWheel(Long tickMs, Integer wheelSize, Long currentTime, DelayQueue<TimerTaskList> delayQueue) {
-        this.tickMs = tickMs;
-        this.wheelSize = wheelSize;
-        this.interval = tickMs * wheelSize;
-        this.buckets = new TimerTaskList[wheelSize];
-        this.currentTime = currentTime - (currentTime % tickMs);
-        this.delayQueue = delayQueue;
-        for (int i = 0; i < wheelSize; i++) {
-            buckets[i] = new TimerTaskList();
+    public static final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() + 1);
+
+
+    public TimeWheel(TimeWheel outLayerWheel, long interval, int scale, Date startTime) {
+        this.wheelScale = scale;
+        this.interval = interval;
+        this.outLayerWheel = outLayerWheel;
+        this.startTime = startTime.getTime();
+        this.rollingIndex = new AtomicInteger(0);
+
+        taskQueues = new PriorityQueue[scale];
+        for (int i = 0; i < taskQueues.length; i++) {
+            taskQueues[i] = new PriorityQueue<>(Comparator.comparingLong(ITimerWheelTask::getExecutingTime));
         }
-    }
 
-    /**
-     * 增加任务
-     *
-     * @param entry 任务包装类
-     * @return true or false
-     */
-    public boolean add(TimerTaskEntry entry) {
-        Long expiration = entry.getExpireMs();
-        if (expiration < tickMs + currentTime) {
-            // 到期了
-            return false;
-        } else if (expiration < currentTime + interval) {
-            // 扔进当前时间轮的某个槽里，只有时间大于某个槽，才会放进去
-            long virtualId = expiration / tickMs;
-            int index = (int)(virtualId % wheelSize);
-            TimerTaskList bucket = buckets[index];
-            bucket.addTask(entry);
-            // 设置bucket过期时间
-            if (bucket.setExpiration(virtualId * tickMs)) {
-                // 设置好过期时间的bucket需要入队
-                delayQueue.offer(bucket);
-                return true;
-            }
-        } else {
-            // 当前时间轮不能满足，需要扔到上一轮
-            TimeWheel timeWheel = getOverFlowWheel();
-            return timeWheel.add(entry);
-        }
-        return false;
-    }
-
-    /**
-     * 获取上一轮时间轮
-     *
-     * @return TimeWheel
-     */
-    private TimeWheel getOverFlowWheel() {
-        if (overflowWheel == null) {
-            synchronized (this) {
-                if (overflowWheel == null) {
-                    overflowWheel = new TimeWheel(interval, wheelSize, currentTime, delayQueue);
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                if(interval == 60000){
+                    log.info("分钟轮运行一次");
+                }
+                if (rollingIndex.incrementAndGet() == wheelScale) {
+                    rollingIndex.set(0);
+                }
+                if (outLayerWheel == null) {
+                    executeHeadingTask(taskQueues[rollingIndex.get()]);
+                } else {
+                    deliveryTasks(taskQueues[rollingIndex.get()]);
                 }
             }
-        }
-        return overflowWheel;
+        }, startTime, interval);
     }
 
     /**
-     * 推进指针
+     * 执行头部任务
      *
-     * @param timestamp 时间戳
+     * @param taskQueue
      */
-    public void advanceLock(Long timestamp) {
-        if (timestamp > currentTime + tickMs) {
-            currentTime = timestamp - timestamp % tickMs;
-            if (overflowWheel != null) {
-                this.getOverFlowWheel().advanceLock(timestamp);
+    private void executeHeadingTask(PriorityQueue<ITimerWheelTask> taskQueue) {
+        while (true) {
+            ITimerWheelTask task = taskQueue.peek();
+            if (task == null) {
+                return;
             }
+            long t1 = task.getExecutingTime();
+            long t2 = System.currentTimeMillis();
+            log.info("execute time :{}, current time: {}", t1, t2);
+            if (task.getExecutingTime() >= System.currentTimeMillis()) {
+                TimeWheel.executorService.submit(task::executeTask);
+                taskQueue.poll();
+                continue;
+            }
+            return;
+        }
+
+    }
+
+    /**
+     * 投递
+     *
+     * @param taskQueue
+     */
+    private void deliveryTasks(PriorityQueue<ITimerWheelTask> taskQueue) {
+        while (true) {
+            ITimerWheelTask task = taskQueue.peek();
+            if (task == null) {
+                return;
+            }
+            // 运行时间已经过去了
+            if (task.getExecutingTime() <= System.currentTimeMillis()) {
+                TimeWheel.executorService.submit(task::executeTask);
+                taskQueue.poll();
+                continue;
+            }
+            // 运行时间在下次周期前
+            if (task.getExecutingTime() + this.interval >= System.currentTimeMillis()) {
+                outLayerWheel.attachTask(task);
+                taskQueue.poll();
+                continue;
+            }
+            return;
         }
     }
+
+    /**
+     * 挂载任务
+     *
+     * @param task
+     */
+    public void attachTask(ITimerWheelTask task) {
+        if (task == null) {
+            return;
+        }
+        long execTime = task.getExecutingTime();
+        long currentTime = System.currentTimeMillis();
+        // 运行时间已经过去了
+        if (execTime <= currentTime || execTime <= startTime) {
+            TimeWheel.executorService.submit(task::executeTask);
+            return;
+        }
+        // 运行时间在当前时间和下个周期之间
+        if (execTime + interval <= currentTime) {
+            // 用外层轮来挂载
+            if (outLayerWheel != null) {
+                outLayerWheel.attachTask(task);
+            }
+            // 无外层轮，直接执行
+            else {
+                TimeWheel.executorService.submit(task::executeTask);
+            }
+            return;
+        }
+        // 挂载在当前轮
+        long timeDiff = execTime - startTime;
+        long index = (timeDiff / interval) % wheelScale;
+        taskQueues[(int) index].add(task);
+    }
+
+    public static void main(String[] args) throws ParseException {
+        TimeWheel secondWheel = new TimeWheel(null, 1000, 60, new Date());
+        TimeWheel minuteWheel = new TimeWheel(secondWheel, 1000 * 60, 60, new Date());
+        addTask(minuteWheel, Calendar.MINUTE, 2);
+        addTask(minuteWheel, Calendar.MINUTE, 3);
+        addTask(minuteWheel, Calendar.MINUTE, 4);
+    }
+
+    private static void addTask(TimeWheel wheel, int type, int delay) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.add(type, delay);
+        wheel.attachTask(new ITimerWheelTask() {
+            @Override
+            public long getExecutingTime() {
+                return calendar.getTimeInMillis();
+            }
+
+            @Override
+            public void executeTask() {
+                System.out.println(calendar.getTimeInMillis() + "");
+            }
+        });
+    }
+
+
 }

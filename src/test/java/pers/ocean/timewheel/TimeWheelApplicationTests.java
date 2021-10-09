@@ -4,8 +4,8 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
-import pers.ocean.timewheel.timer.SystemTimer;
-import pers.ocean.timewheel.timer.TimerTask;
+import pers.ocean.timewheel.error.timer.SystemTimer;
+import pers.ocean.timewheel.error.timer.TimerTask;
 
 @SpringBootTest
 class TimeWheelApplicationTests {
