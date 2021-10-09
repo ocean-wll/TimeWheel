@@ -52,7 +52,7 @@ public class SystemTimer implements Timer {
      *
      * @param entry 任务实体
      */
-    public void addTimerTaskEntry(TimerTaskEntry entry) {
+    private void addTimerTaskEntry(TimerTaskEntry entry) {
         if (!timeWheel.add(entry)) {
             // 已经过期
             TimerTask timerTask = entry.getTimerTask();
